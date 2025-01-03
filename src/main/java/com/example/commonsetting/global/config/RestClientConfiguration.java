@@ -3,10 +3,11 @@ package com.example.commonsetting.global.config;
 import com.example.commonsetting.global.exception.code.RestTemplateResponseErrorHandler;
 import com.google.gson.GsonBuilder;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.http.ssl.SSLContexts;
 import org.slf4j.MDC;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Bean;
@@ -28,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyManagementException;
+import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -44,17 +46,17 @@ import static org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace;
 public class RestClientConfiguration {
     @Bean
     @Primary
-    public RestTemplate restClient() throws NoSuchAlgorithmException, KeyManagementException {
+    public RestTemplate restClient() throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException {
         return getRestTemplate(30L);
     }
 
     @Bean
-    public RestTemplate restClientMin2() throws NoSuchAlgorithmException, KeyManagementException {
+    public RestTemplate restClientMin2() throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException {
         return getRestTemplate(2 * 60L);
     }
 
-    private RestTemplate getRestTemplate(Long readTimeOut) throws NoSuchAlgorithmException, KeyManagementException {
-        // ignore ssl
+    private RestTemplate getRestTemplate(Long readTimeOut) throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException {
+        // 1) 모든 SSL 인증서를 신뢰하도록 TrustManager 설정
         TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
             public void checkClientTrusted(X509Certificate[] certs, String authType) {}
             public void checkServerTrusted(X509Certificate[] certs, String authType) {}
@@ -62,32 +64,40 @@ public class RestClientConfiguration {
                 return new X509Certificate[0];
             }
         }};
-        SSLContext sslContext = SSLContext.getInstance("SSL");
-        sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
 
-        // 3) PoolingHttpClientConnectionManager를 통해 커넥션 풀 설정
+        // 2) SSLContext를 설정하여 SSL 인증을 무시
+        SSLContext sslContext = SSLContexts.custom()
+                .loadTrustMaterial(((chain, authType) -> true)) // 모든 인증서를 신뢰
+                .build();
+
         PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager();
         connectionManager.setMaxTotal(50);            // 이전 setMaxConnTotal 대체
         connectionManager.setDefaultMaxPerRoute(50);  // 이전 setMaxConnPerRoute 대체
 
-        // 4) HttpClientBuilder에 connectionManager, SSL, hostnameVerifier 설정
-        CloseableHttpClient httpClient = HttpClientBuilder.create()
-                .setConnectionManager(connectionManager)
-                .setSSLContext(sslContext)
-                .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+        // 3) 커넥션 풀 매니저 설정
+
+        // 4) HttpClient를 구성
+        CloseableHttpClient httpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)          // 커넥션 풀 적용
+                .setSSLContext(sslContext)                        // SSLContext 적용
+                .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE) // 호스트 이름 검증 비활성화
                 .build();
 
-        // 5) HttpRequestFactory 생성
+        // 5) HttpComponentsClientHttpRequestFactory 설정
         HttpComponentsClientHttpRequestFactory httpRequestFactory = new HttpComponentsClientHttpRequestFactory();
         httpRequestFactory.setHttpClient(httpClient);
 
+        // 6) RestTemplate 생성
         RestTemplate restTemplate = new RestTemplateBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .readTimeout(Duration.ofSeconds(readTimeOut))
-                .requestFactory(() -> new BufferingClientHttpRequestFactory(httpRequestFactory))
+                .setConnectTimeout(Duration.ofSeconds(10))                     // 연결 타임아웃 설정
+                .setReadTimeout(Duration.ofSeconds(readTimeOut))               // 읽기 타임아웃 설정
+                .requestFactory(() -> new BufferingClientHttpRequestFactory(httpRequestFactory)) // RequestFactory 설정
                 .build();
+
+        // 7) Interceptor 및 ErrorHandler 추가
         restTemplate.setInterceptors(Collections.singletonList(new RequestResponseLoggingInterceptor()));
         restTemplate.setErrorHandler(new RestTemplateResponseErrorHandler());
+
         return restTemplate;
     }
 
